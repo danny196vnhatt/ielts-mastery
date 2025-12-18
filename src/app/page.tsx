@@ -2,14 +2,16 @@
 import { useState, useEffect, useRef } from 'react'
 import { 
   LayoutGrid, BookOpen, Flame, ChevronLeft, ChevronRight, 
-  Target, Trophy, Lightbulb, CheckCircle2, ArrowRight, Plus, X, Save, Edit2, Trash2, FolderPlus
+  Trophy, Lightbulb, CheckCircle2, ArrowRight, Plus, X, Save, Edit2, Trash2, FolderPlus, LogOut
 } from 'lucide-react'
 import Flashcard from '@/components/Flashcard' 
-import { vocabularyData as initialData } from '@/data/vocabulary'
+import { createBrowserClient } from '@supabase/ssr' 
+import { useRouter } from 'next/navigation'
 
-// --- KIỂU DỮ LIỆU CHUẨN ĐỂ KHÔNG LỖI BẤT CỨ ĐÂU ---
+// --- KIỂU DỮ LIỆU CHUẨN ---
 interface Vocabulary {
   id: string;
+  user_id: string;
   word: string;
   ipa: string;
   type: string;
@@ -26,93 +28,147 @@ interface Vocabulary {
 
 interface Folder {
   id: string;
+  user_id: string;
   label: string;
   topics: string[];
   color: string;
 }
 
 export default function IpadDashboard() {
-  // --- 1. STATE MANAGEMENT ---
-  const [isSidebarOpen, setSidebarOpen] = useState(true);
-  const [showMotivation, setShowMotivation] = useState(true);
-  const [viewMode, setViewMode] = useState<'grid' | 'learning'>('grid'); 
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const router = useRouter()
+  const timerRef = useRef<NodeJS.Timeout | null>(null)
   
-  const [showDeleteFolderId, setShowDeleteFolderId] = useState<string | null>(null);
-  const [showDeleteWordId, setShowDeleteWordId] = useState<string | null>(null);
+  // Khởi tạo Supabase Client theo chuẩn SSR
+  const supabase = createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
 
-  const [vocabList, setVocabList] = useState<Vocabulary[]>(initialData as Vocabulary[]);
-  const [folders, setFolders] = useState<Folder[]>([
-    { id: 'f1', label: 'Writing Task 2', topics: ['Environment', 'Education', 'Society', 'Health'], color: 'bg-orange-500' },
-    { id: 'f2', label: 'Speaking Part 1', topics: ['Speaking', 'Traveling', 'Work'], color: 'bg-blue-500' }
-  ]);
-  const [activeFolderId, setActiveFolderId] = useState('f1');
-  const [streak, setStreak] = useState(12);
+  // --- 1. STATE MANAGEMENT ---
+  const [user, setUser] = useState<any>(null)
+  const [isSidebarOpen, setSidebarOpen] = useState(true)
+  const [showMotivation, setShowMotivation] = useState(true)
+  const [viewMode, setViewMode] = useState<'grid' | 'learning'>('grid') 
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isFolderModalOpen, setIsFolderModalOpen] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  
+  const [showDeleteFolderId, setShowDeleteFolderId] = useState<string | null>(null)
+  const [showDeleteWordId, setShowDeleteWordId] = useState<string | null>(null)
+
+  const [vocabList, setVocabList] = useState<Vocabulary[]>([])
+  const [folders, setFolders] = useState<Folder[]>([])
+  const [activeFolderId, setActiveFolderId] = useState('')
+  const [streak, setStreak] = useState(12)
 
   const [formData, setFormData] = useState({
     word: '', ipa: '', type: 'Verb', definition: '', wordFamily: '', 
-    patterns: '', synonyms: '', collocations: '', examples: '', note: '', topic: 'Education'
-  });
+    patterns: '', synonyms: '', collocations: '', examples: '', note: '', topic: ''
+  })
+  const [folderFormData, setFolderFormData] = useState({ label: '', topics: '', color: 'bg-green-500' })
 
-  const [folderFormData, setFolderFormData] = useState({ label: '', topics: '', color: 'bg-green-500' });
-
-  // --- 2. LOGIC LONG PRESS (ẤN GIỮ ĐỂ XÓA) ---
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-
-  const handleTouchStart = (id: string, type: 'folder' | 'word') => {
-    timerRef.current = setTimeout(() => {
-      if (type === 'folder') setShowDeleteFolderId(id);
-      else setShowDeleteWordId(id);
-      if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(50);
-    }, 600);
-  };
-
-  const handleTouchEnd = () => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-  };
-
-  // --- 3. LOGIC HỆ THỐNG ---
+  // --- 2. LOGIC AUTH & DATA FETCHING ---
   useEffect(() => {
-    const savedVocab = localStorage.getItem('ielts-progress');
-    const savedFolders = localStorage.getItem('ielts-folders');
-    if (savedVocab) setVocabList(JSON.parse(savedVocab));
-    if (savedFolders) setFolders(JSON.parse(savedFolders));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: string, session: any) => {
+      if (session) {
+        setUser(session.user)
+        fetchCloudData(session.user.id)
+      } else {
+        router.replace('/login')
+      }
+    })
+    return () => subscription.unsubscribe()
+  }, [])
 
-    const handleClickOutside = () => {
-      setShowDeleteFolderId(null);
-      setShowDeleteWordId(null);
-    };
-    window.addEventListener('click', handleClickOutside);
-    return () => window.removeEventListener('click', handleClickOutside);
-  }, []);
+  const fetchCloudData = async (userId: string) => {
+    const { data: vData } = await supabase.from('vocabularies').select('*').eq('user_id', userId)
+    const { data: fData } = await supabase.from('folders').select('*').eq('user_id', userId)
+    
+    if (vData) setVocabList(vData as Vocabulary[])
+    if (fData && fData.length > 0) {
+      setFolders(fData as Folder[])
+      if (!activeFolderId) setActiveFolderId(fData[0].id)
+    }
+  }
 
-  const activeFolder = folders.find(f => f.id === activeFolderId) || folders[0];
-  const filteredVocab = vocabList.filter(v => activeFolder.topics.includes(v.topic));
-  const learningQueue = filteredVocab.filter(v => v.status !== 'mastered');
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+  }
 
-  const handleSaveFolder = () => {
-    if (!folderFormData.label.trim()) return alert("Vui lòng nhập tên Folder");
-    const newFolder: Folder = {
-      id: `f-${Date.now()}`,
+  // --- 3. QUẢN LÝ DỮ LIỆU ---
+  const handleSaveFolder = async () => {
+    if (!folderFormData.label.trim() || !user) return
+    const newFolder = {
+      user_id: user.id,
       label: folderFormData.label,
       topics: folderFormData.topics.split(',').map(t => t.trim()).filter(t => t !== ""),
       color: folderFormData.color
-    };
-    const newFolders = [...folders, newFolder];
-    setFolders(newFolders);
-    localStorage.setItem('ielts-folders', JSON.stringify(newFolders));
-    setIsFolderModalOpen(false);
-    setFolderFormData({ label: '', topics: '', color: 'bg-green-500' });
-  };
+    }
+    const { error } = await supabase.from('folders').insert([newFolder])
+    if (!error) {
+      fetchCloudData(user.id)
+      setIsFolderModalOpen(false)
+      setFolderFormData({ label: '', topics: '', color: 'bg-green-500' })
+    }
+  }
 
-  const deleteFolder = (id: string) => {
-    if (folders.length <= 1) return alert("Phải giữ ít nhất 1 thư mục");
-    const newList = folders.filter(f => f.id !== id);
-    setFolders(newList);
-    localStorage.setItem('ielts-folders', JSON.stringify(newList));
-    if (activeFolderId === id) setActiveFolderId(newList[0].id);
+  const handleSaveWord = async () => {
+    if (!user) return
+    
+    // FIX LỖI 126: Đảm bảo status không bao giờ bị undefined khi cập nhật
+    const currentStatus = editingId 
+      ? (vocabList.find(v => v.id === editingId)?.status || 'new') 
+      : 'new';
+    
+    const formattedWord = {
+      user_id: user.id,
+      word: formData.word,
+      ipa: formData.ipa,
+      type: formData.type,
+      definition: formData.definition,
+      patterns: formData.patterns,
+      note: formData.note,
+      topic: formData.topic || (folders.find(f => f.id === activeFolderId)?.topics[0] || 'General'),
+      status: currentStatus,
+      wordFamily: formData.wordFamily.split(',').map(f => {
+        const parts = f.trim().split('(');
+        return { form: parts[0].trim(), type: parts[1] ? parts[1].replace(')', '') : 'n' };
+      }),
+      synonyms: formData.synonyms.split(',').map(s => s.trim()),
+      collocations: formData.collocations.split('\n').filter(l => l.trim() !== ""),
+      examples: formData.examples.split('\n').filter(l => l.trim() !== ""),
+    }
+
+    const { error } = editingId 
+      ? await supabase.from('vocabularies').update(formattedWord).eq('id', editingId)
+      : await supabase.from('vocabularies').insert([formattedWord])
+
+    if (!error) {
+      fetchCloudData(user.id)
+      setIsModalOpen(false)
+      setEditingId(null)
+      setFormData({ word: '', ipa: '', type: 'Verb', definition: '', wordFamily: '', patterns: '', synonyms: '', collocations: '', examples: '', note: '', topic: '' })
+    }
+  }
+
+  const deleteFolder = async (id: string) => {
+    if (folders.length <= 1) return
+    await supabase.from('folders').delete().eq('id', id)
+    fetchCloudData(user?.id)
+  }
+
+  const deleteWord = async (id: string) => {
+    await supabase.from('vocabularies').delete().eq('id', id)
+    fetchCloudData(user?.id)
+  }
+
+  const markAsMastered = async (id: string) => {
+    if (!user) return
+    const { error } = await supabase.from('vocabularies').update({ status: 'mastered' }).eq('id', id)
+    if (!error) {
+      fetchCloudData(user.id)
+      if (learningQueue.length <= 1) setViewMode('grid')
+    }
   };
 
   const openEditModal = (word: Vocabulary) => {
@@ -127,48 +183,20 @@ export default function IpadDashboard() {
     setIsModalOpen(true);
   };
 
-  const handleSaveWord = () => {
-    const currentStatus = editingId ? (vocabList.find(v => v.id === editingId)?.status || 'new') : 'new';
-    
-    const formattedWord: Vocabulary = {
-      ...formData,
-      id: editingId || `custom-${Date.now()}`,
-      status: currentStatus as any, 
-      wordFamily: formData.wordFamily.split(',').map(f => {
-        const parts = f.trim().split('(');
-        return { form: parts[0].trim(), type: parts[1] ? parts[1].replace(')', '') : 'n' };
-      }),
-      synonyms: formData.synonyms.split(',').map(s => s.trim()),
-      collocations: formData.collocations.split('\n').filter(l => l.trim() !== ""),
-      examples: formData.examples.split('\n').filter(l => l.trim() !== ""),
-    };
-
-    let newList: Vocabulary[];
-    if (editingId) {
-      newList = vocabList.map(v => v.id === editingId ? formattedWord : v);
-    } else {
-      newList = [...vocabList, formattedWord];
-    }
-
-    setVocabList(newList);
-    localStorage.setItem('ielts-progress', JSON.stringify(newList));
-    setIsModalOpen(false);
-    setEditingId(null);
-    setFormData({ word: '', ipa: '', type: 'Verb', definition: '', wordFamily: '', patterns: '', synonyms: '', collocations: '', examples: '', note: '', topic: activeFolder.topics[0] || 'Education' });
+  // --- 4. UI LOGIC ---
+  const handleTouchStart = (id: string, type: 'folder' | 'word') => {
+    timerRef.current = setTimeout(() => {
+      if (type === 'folder') setShowDeleteFolderId(id);
+      else setShowDeleteWordId(id);
+      if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(50);
+    }, 600);
   };
 
-  const deleteWord = (id: string) => {
-    const newList = vocabList.filter(v => v.id !== id);
-    setVocabList(newList);
-    localStorage.setItem('ielts-progress', JSON.stringify(newList));
-  };
+  const activeFolder = folders.find(f => f.id === activeFolderId) || folders[0]
+  const filteredVocab = vocabList.filter(v => activeFolder?.topics.includes(v.topic))
+  const learningQueue = filteredVocab.filter(v => v.status !== 'mastered')
 
-  const markAsMastered = (id: string) => {
-    const newList = vocabList.map(v => v.id === id ? { ...v, status: 'mastered' as const } : v);
-    setVocabList(newList);
-    localStorage.setItem('ielts-progress', JSON.stringify(newList));
-    if (learningQueue.length <= 1) setViewMode('grid');
-  };
+  if (!user) return <div className="h-screen bg-[#F8F9FA]" />; 
 
   return (
     <div className="flex h-screen bg-[#F8F9FA] text-slate-900 overflow-hidden font-sans select-none">
@@ -182,42 +210,36 @@ export default function IpadDashboard() {
             <button onClick={() => setIsFolderModalOpen(true)} className="p-1 hover:bg-blue-50 text-blue-600 rounded-md transition-colors"><FolderPlus size={16}/></button>
           </div>
           {folders.map(folder => (
-            <div key={folder.id} className="relative group" onMouseDown={() => handleTouchStart(folder.id, 'folder')} onMouseUp={handleTouchEnd} onTouchStart={() => handleTouchStart(folder.id, 'folder')} onTouchEnd={handleTouchEnd}>
-              <FolderItem label={folder.label} count={vocabList.filter(v => folder.topics.includes(v.topic)).length} color={folder.color} active={activeFolderId === folder.id} onClick={() => { if(!showDeleteFolderId) { setActiveFolderId(folder.id); setViewMode('grid'); }}} />
+            <div key={folder.id} className="relative group" onMouseDown={() => handleTouchStart(folder.id, 'folder')} onMouseUp={() => clearTimeout(timerRef.current!)} onTouchStart={() => handleTouchStart(folder.id, 'folder')} onTouchEnd={() => clearTimeout(timerRef.current!)}>
+              <FolderItem label={folder.label} count={vocabList.filter(v => folder.topics.includes(v.topic)).length} color={folder.color} active={activeFolderId === folder.id} onClick={() => { setActiveFolderId(folder.id); setViewMode('grid'); }} />
               {showDeleteFolderId === folder.id && (
-                <button onClick={(e) => { e.stopPropagation(); deleteFolder(folder.id); }} className="absolute right-0 inset-y-0 w-12 bg-red-500 text-white flex items-center justify-center rounded-xl animate-in slide-in-from-right-full"><Trash2 size={16}/></button>
+                <button onClick={(e: any) => { e.stopPropagation(); deleteFolder(folder.id); }} className="absolute right-0 inset-y-0 w-12 bg-red-500 text-white flex items-center justify-center rounded-xl animate-in slide-in-from-right-full"><Trash2 size={16}/></button>
               )}
             </div>
           ))}
         </nav>
-        <div className="p-4 border-t">
-          <button onClick={() => {setEditingId(null); setIsModalOpen(true);}} className="w-full flex items-center justify-center gap-2 py-4 bg-blue-600 text-white rounded-2xl font-black shadow-lg hover:bg-blue-700 transition-all active:scale-95"><Plus size={20}/> THÊM TỪ MỚI</button>
+        <div className="p-4 border-t space-y-2">
+          <button onClick={() => {setEditingId(null); setIsModalOpen(true)}} className="w-full flex items-center justify-center gap-2 py-4 bg-blue-600 text-white rounded-2xl font-black shadow-lg hover:bg-blue-700 active:scale-95 transition-all"><Plus size={20}/> THÊM TỪ MỚI</button>
+          <button onClick={handleLogout} className="w-full flex items-center justify-center gap-2 py-3 text-slate-400 font-bold hover:text-red-500 transition-all"><LogOut size={18}/> Đăng xuất</button>
         </div>
       </aside>
 
-      {/* NỘI DUNG CHÍNH */}
       <main className="flex-1 flex flex-col relative bg-[#F2F4F7]">
         <button onClick={() => setSidebarOpen(!isSidebarOpen)} className="absolute top-6 left-4 z-50 p-2 bg-white shadow-sm rounded-xl border border-gray-100 hover:bg-slate-50 transition-colors">{isSidebarOpen ? <ChevronLeft size={20}/> : <ChevronRight size={20}/>}</button>
 
         {viewMode === 'grid' ? (
           <div className="p-8 pt-16 overflow-y-auto">
-            <h1 className="text-4xl font-black mb-8 tracking-tight text-slate-800">{activeFolder.label}</h1>
+            <h1 className="text-4xl font-black mb-8 tracking-tight text-slate-800">{activeFolder?.label}</h1>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
-              {activeFolder.topics.map(topic => (
-                <TopicCard 
-                  key={topic} 
-                  title={topic} 
-                  progress={vocabList.filter(v => v.topic === topic && v.status === 'mastered').length} 
-                  total={vocabList.filter(v => v.topic === topic).length || 0} 
-                  onStudy={() => setViewMode('learning')} 
-                />
+              {activeFolder?.topics.map(topic => (
+                <TopicCard key={topic} title={topic} progress={vocabList.filter(v => v.topic === topic && v.status === 'mastered').length} total={vocabList.filter(v => v.topic === topic).length || 0} onStudy={() => setViewMode('learning')} />
               ))}
             </div>
             
-            <h2 className="mb-6 text-sm font-black flex items-center gap-2 text-slate-400 uppercase tracking-widest"><BookOpen size={16}/> Quản lý kho từ vựng</h2>
+            <h2 className="mb-6 text-sm font-black flex items-center gap-2 text-slate-400 uppercase tracking-widest"><BookOpen size={16}/> Quản lý từ vựng</h2>
             <div className="space-y-3">
               {filteredVocab.map(word => (
-                <div key={word.id} className="relative overflow-hidden rounded-2xl shadow-sm" onMouseDown={() => handleTouchStart(word.id, 'word')} onMouseUp={handleTouchEnd} onTouchStart={() => handleTouchStart(word.id, 'word')} onTouchEnd={handleTouchEnd}>
+                <div key={word.id} className="relative overflow-hidden rounded-2xl shadow-sm" onMouseDown={() => handleTouchStart(word.id, 'word')} onMouseUp={() => clearTimeout(timerRef.current!)} onTouchStart={() => handleTouchStart(word.id, 'word')} onTouchEnd={() => clearTimeout(timerRef.current!)}>
                   <div className="bg-white p-4 flex justify-between items-center hover:bg-slate-50 transition-colors">
                     <div>
                       <span className="font-black text-lg text-slate-700">{word.word}</span>
@@ -226,7 +248,7 @@ export default function IpadDashboard() {
                     <button onClick={() => openEditModal(word)} className="p-2 text-blue-500 hover:bg-blue-50 rounded-xl transition-colors"><Edit2 size={18}/></button>
                   </div>
                   {showDeleteWordId === word.id && (
-                    <button onClick={(e) => { e.stopPropagation(); deleteWord(word.id); }} className="absolute right-0 inset-y-0 w-16 bg-red-500 text-white font-black flex items-center justify-center animate-in slide-in-from-right-full">XÓA</button>
+                    <button onClick={(e: any) => { e.stopPropagation(); deleteWord(word.id); }} className="absolute right-0 inset-y-0 w-16 bg-red-500 text-white font-black flex items-center justify-center animate-in slide-in-from-right-full">XÓA</button>
                   )}
                 </div>
               ))}
@@ -259,12 +281,12 @@ export default function IpadDashboard() {
 
       {/* MODALS */}
       {isFolderModalOpen && (
-        <div className="fixed inset-0 z-[110] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-[3rem] p-10 shadow-2xl space-y-6 animate-in zoom-in duration-200">
+        <div className="fixed inset-0 z-[110] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setIsFolderModalOpen(false)}>
+          <div className="bg-white w-full max-w-md rounded-[3rem] p-10 shadow-2xl space-y-6 animate-in zoom-in duration-200" onClick={e => e.stopPropagation()}>
             <h2 className="text-2xl font-black italic text-slate-800">Tạo Folder Mới</h2>
             <div className="space-y-4">
               <Input label="Tên Folder" value={folderFormData.label} onChange={(v:any) => setFolderFormData({...folderFormData, label: v})} placeholder="VD: Writing Task 1" />
-              <Input label="Topics nhỏ (cách nhau dấu phẩy)" value={folderFormData.topics} onChange={(v:any) => setFolderFormData({...folderFormData, topics: v})} placeholder="Traveling, Education, Music" />
+              <Input label="Topics nhỏ (cách nhau dấu phẩy)" value={folderFormData.topics} onChange={(v:any) => setFolderFormData({...folderFormData, topics: v})} placeholder="Map, Process, Chart" />
               <Select label="Màu sắc" options={['bg-orange-500', 'bg-blue-500', 'bg-green-500', 'bg-purple-500']} value={folderFormData.color} onChange={(v:any) => setFolderFormData({...folderFormData, color: v})} />
             </div>
             <div className="flex gap-4 pt-4">
@@ -276,8 +298,8 @@ export default function IpadDashboard() {
       )}
 
       {isModalOpen && (
-        <div className="fixed inset-0 z-[100] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in slide-in-from-bottom-10 duration-300">
+        <div className="fixed inset-0 z-[100] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setIsModalOpen(false)}>
+          <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in slide-in-from-bottom-10 duration-300" onClick={e => e.stopPropagation()}>
             <div className="p-8 border-b flex justify-between items-center bg-slate-50/50">
               <h2 className="text-xl font-black italic text-slate-800">{editingId ? 'Chỉnh sửa từ vựng' : 'Thêm từ mới chuyên sâu'}</h2>
               <button onClick={() => setIsModalOpen(false)} className="p-2 hover:bg-slate-200 rounded-full transition-colors"><X/></button>
@@ -289,8 +311,8 @@ export default function IpadDashboard() {
               </div>
               <div className="grid grid-cols-3 gap-6">
                 <Select label="Loại từ" options={['Verb', 'Noun', 'Adjective', 'Adverb']} value={formData.type} onChange={(v:any) => setFormData({...formData, type: v})} />
-                <Input label="Patterns" value={formData.patterns} onChange={(v:any) => setFormData({...formData, patterns: v})} placeholder="TO something" />
-                <Select label="Topic" options={activeFolder.topics} value={formData.topic} onChange={(v:any) => setFormData({...formData, topic: v})} />
+                <Input label="Patterns" value={formData.patterns} onChange={(v:any) => setFormData({...formData, patterns: v})} />
+                <Select label="Topic" options={activeFolder?.topics || []} value={formData.topic} onChange={(v:any) => setFormData({...formData, topic: v})} />
               </div>
               <Input label="Định nghĩa (VN)" value={formData.definition} onChange={(v:any) => setFormData({...formData, definition: v})} />
               <Input label="Word Family" value={formData.wordFamily} onChange={(v:any) => setFormData({...formData, wordFamily: v})} placeholder="Contribution (n), Contributor (n)" />
@@ -301,7 +323,7 @@ export default function IpadDashboard() {
             </div>
             <div className="p-8 bg-slate-50/50 border-t flex gap-4">
               <button onClick={() => setIsModalOpen(false)} className="flex-1 py-4 font-bold text-slate-400">Hủy</button>
-              <button onClick={handleSaveWord} className="flex-1 py-4 bg-blue-600 text-white font-black rounded-2xl shadow-lg flex items-center justify-center gap-2 hover:bg-blue-700 transition-all">
+              <button onClick={handleSaveWord} className="flex-1 py-4 bg-blue-600 text-white font-black rounded-2xl shadow-lg flex items-center justify-center gap-2 hover:bg-blue-700">
                 <Save size={20}/> {editingId ? 'CẬP NHẬT' : 'LƯU VÀO KHO'}
               </button>
             </div>
@@ -324,7 +346,7 @@ export default function IpadDashboard() {
   )
 }
 
-// --- COMPONENTS PHỤ ---
+// --- SUB-COMPONENTS ---
 function NavItem({ icon, label, active, onClick }: any) {
   return (
     <div onClick={onClick} className={`flex items-center gap-4 p-4 rounded-2xl cursor-pointer transition-all ${active ? 'bg-blue-600 text-white shadow-lg shadow-blue-100' : 'hover:bg-slate-50 text-slate-500'}`}>
