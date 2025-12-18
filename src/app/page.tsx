@@ -8,7 +8,7 @@ import Flashcard from '@/components/Flashcard'
 import { createBrowserClient } from '@supabase/ssr' 
 import { useRouter } from 'next/navigation'
 
-// --- KIỂU DỮ LIỆU CHUẨN ---
+// --- KIỂU DỮ LIỆU ---
 interface Vocabulary {
   id: string;
   user_id: string;
@@ -38,7 +38,6 @@ export default function IpadDashboard() {
   const router = useRouter()
   const timerRef = useRef<NodeJS.Timeout | null>(null)
   
-  // Khởi tạo Supabase Client theo chuẩn SSR
   const supabase = createBrowserClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -59,7 +58,10 @@ export default function IpadDashboard() {
   const [vocabList, setVocabList] = useState<Vocabulary[]>([])
   const [folders, setFolders] = useState<Folder[]>([])
   const [activeFolderId, setActiveFolderId] = useState('')
-  const [streak, setStreak] = useState(12)
+  
+  // State cho Streak thực tế
+  const [streak, setStreak] = useState(0)
+  const [dailyCount, setDailyCount] = useState(0)
 
   const [formData, setFormData] = useState({
     word: '', ipa: '', type: 'Verb', definition: '', wordFamily: '', 
@@ -73,6 +75,7 @@ export default function IpadDashboard() {
       if (session) {
         setUser(session.user)
         fetchCloudData(session.user.id)
+        fetchStreakData(session.user.id)
       } else {
         router.replace('/login')
       }
@@ -90,6 +93,33 @@ export default function IpadDashboard() {
       if (!activeFolderId) setActiveFolderId(fData[0].id)
     }
   }
+
+  const fetchStreakData = async (userId: string) => {
+    const { data } = await supabase.from('user_stats').select('*').eq('user_id', userId).single();
+    if (data) {
+      const today = new Date().toISOString().split('T')[0];
+      const lastDate = data.last_study_date;
+
+      if (lastDate !== today) {
+        setDailyCount(0);
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yesterdayStr = yesterday.toISOString().split('T')[0];
+        
+        if (lastDate && lastDate < yesterdayStr) {
+          await supabase.from('user_stats').update({ streak_count: 0, daily_review_count: 0 }).eq('user_id', userId);
+          setStreak(0);
+        } else {
+          setStreak(data.streak_count);
+        }
+      } else {
+        setStreak(data.streak_count);
+        setDailyCount(data.daily_review_count);
+      }
+    } else {
+      await supabase.from('user_stats').insert([{ user_id: userId, streak_count: 0, daily_review_count: 0 }]);
+    }
+  };
 
   const handleLogout = async () => {
     await supabase.auth.signOut()
@@ -114,8 +144,6 @@ export default function IpadDashboard() {
 
   const handleSaveWord = async () => {
     if (!user) return
-    
-    // FIX LỖI 126: Đảm bảo status không bao giờ bị undefined khi cập nhật
     const currentStatus = editingId 
       ? (vocabList.find(v => v.id === editingId)?.status || 'new') 
       : 'new';
@@ -155,17 +183,37 @@ export default function IpadDashboard() {
     if (folders.length <= 1) return
     await supabase.from('folders').delete().eq('id', id)
     fetchCloudData(user?.id)
+    setShowDeleteFolderId(null)
   }
 
   const deleteWord = async (id: string) => {
     await supabase.from('vocabularies').delete().eq('id', id)
     fetchCloudData(user?.id)
+    setShowDeleteWordId(null)
   }
 
   const markAsMastered = async (id: string) => {
     if (!user) return
     const { error } = await supabase.from('vocabularies').update({ status: 'mastered' }).eq('id', id)
+    
     if (!error) {
+      const newDailyCount = dailyCount + 1;
+      setDailyCount(newDailyCount);
+      const today = new Date().toISOString().split('T')[0];
+      let newStreak = streak;
+
+      if (newDailyCount === 3) {
+        newStreak = streak + 1;
+        setStreak(newStreak);
+      }
+
+      await supabase.from('user_stats').upsert({
+        user_id: user.id,
+        streak_count: newStreak,
+        daily_review_count: newDailyCount,
+        last_study_date: today
+      });
+
       fetchCloudData(user.id)
       if (learningQueue.length <= 1) setViewMode('grid')
     }
@@ -207,11 +255,11 @@ export default function IpadDashboard() {
           <NavItem icon={<LayoutGrid size={20}/>} label="Tổng quan" active={viewMode === 'grid'} onClick={() => setViewMode('grid')} />
           <div className="mt-8 mb-2 px-3 flex justify-between items-center text-[10px] font-black text-slate-400 uppercase tracking-widest">
             <span>Folders</span>
-            <button onClick={() => setIsFolderModalOpen(true)} className="p-1 hover:bg-blue-50 text-blue-600 rounded-md transition-colors"><FolderPlus size={16}/></button>
+            <button onClick={() => setIsFolderModalOpen(true)} className="p-1 hover:bg-blue-50 text-blue-600 rounded-md"><FolderPlus size={16}/></button>
           </div>
           {folders.map(folder => (
             <div key={folder.id} className="relative group" onMouseDown={() => handleTouchStart(folder.id, 'folder')} onMouseUp={() => clearTimeout(timerRef.current!)} onTouchStart={() => handleTouchStart(folder.id, 'folder')} onTouchEnd={() => clearTimeout(timerRef.current!)}>
-              <FolderItem label={folder.label} count={vocabList.filter(v => folder.topics.includes(v.topic)).length} color={folder.color} active={activeFolderId === folder.id} onClick={() => { setActiveFolderId(folder.id); setViewMode('grid'); }} />
+              <FolderItem label={folder.label} count={vocabList.filter(v => folder.topics.includes(v.topic)).length} color={folder.color} active={activeFolderId === folder.id} onClick={() => { if(!showDeleteFolderId) {setActiveFolderId(folder.id); setViewMode('grid'); }}} />
               {showDeleteFolderId === folder.id && (
                 <button onClick={(e: any) => { e.stopPropagation(); deleteFolder(folder.id); }} className="absolute right-0 inset-y-0 w-12 bg-red-500 text-white flex items-center justify-center rounded-xl animate-in slide-in-from-right-full"><Trash2 size={16}/></button>
               )}
@@ -224,19 +272,36 @@ export default function IpadDashboard() {
         </div>
       </aside>
 
+      {/* MAIN CONTENT */}
       <main className="flex-1 flex flex-col relative bg-[#F2F4F7]">
         <button onClick={() => setSidebarOpen(!isSidebarOpen)} className="absolute top-6 left-4 z-50 p-2 bg-white shadow-sm rounded-xl border border-gray-100 hover:bg-slate-50 transition-colors">{isSidebarOpen ? <ChevronLeft size={20}/> : <ChevronRight size={20}/>}</button>
 
         {viewMode === 'grid' ? (
           <div className="p-8 pt-16 overflow-y-auto">
             <h1 className="text-4xl font-black mb-8 tracking-tight text-slate-800">{activeFolder?.label}</h1>
+            
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
               {activeFolder?.topics.map(topic => (
                 <TopicCard key={topic} title={topic} progress={vocabList.filter(v => v.topic === topic && v.status === 'mastered').length} total={vocabList.filter(v => v.topic === topic).length || 0} onStudy={() => setViewMode('learning')} />
               ))}
             </div>
+
+            {/* Daily Streak Progress */}
+            <div className="mb-12 p-8 bg-white rounded-[3rem] border border-white shadow-sm flex items-center justify-between">
+               <div>
+                  <h3 className="text-sm font-black text-slate-400 uppercase tracking-widest mb-2">Mục tiêu hằng ngày</h3>
+                  <p className="text-2xl font-black text-slate-800">{dailyCount >= 3 ? 'Đã hoàn thành! 🔥' : `Ôn thêm ${3-dailyCount} từ để giữ Streak`}</p>
+               </div>
+               <div className="flex gap-3">
+                  {[1,2,3].map(i => (
+                    <div key={i} className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${dailyCount >= i ? 'bg-orange-500 text-white shadow-lg shadow-orange-100' : 'bg-slate-100 text-slate-300'}`}>
+                      <CheckCircle2 size={24} />
+                    </div>
+                  ))}
+               </div>
+            </div>
             
-            <h2 className="mb-6 text-sm font-black flex items-center gap-2 text-slate-400 uppercase tracking-widest"><BookOpen size={16}/> Quản lý từ vựng</h2>
+            <h2 className="mb-6 text-sm font-black flex items-center gap-2 text-slate-400 uppercase tracking-widest"><BookOpen size={16}/> Quản lý kho từ</h2>
             <div className="space-y-3">
               {filteredVocab.map(word => (
                 <div key={word.id} className="relative overflow-hidden rounded-2xl shadow-sm" onMouseDown={() => handleTouchStart(word.id, 'word')} onMouseUp={() => clearTimeout(timerRef.current!)} onTouchStart={() => handleTouchStart(word.id, 'word')} onTouchEnd={() => clearTimeout(timerRef.current!)}>
@@ -248,7 +313,7 @@ export default function IpadDashboard() {
                     <button onClick={() => openEditModal(word)} className="p-2 text-blue-500 hover:bg-blue-50 rounded-xl transition-colors"><Edit2 size={18}/></button>
                   </div>
                   {showDeleteWordId === word.id && (
-                    <button onClick={(e: any) => { e.stopPropagation(); deleteWord(word.id); }} className="absolute right-0 inset-y-0 w-16 bg-red-500 text-white font-black flex items-center justify-center animate-in slide-in-from-right-full">XÓA</button>
+                    <button onClick={(e: any) => { e.stopPropagation(); deleteWord(word.id); }} className="absolute right-0 inset-y-0 w-16 bg-red-500 text-white font-black flex items-center justify-center animate-in slide-in-from-right-full uppercase text-xs">Xóa</button>
                   )}
                 </div>
               ))}
@@ -279,7 +344,19 @@ export default function IpadDashboard() {
         )}
       </main>
 
-      {/* MODALS */}
+      {/* MOTIVATION BAR */}
+      <aside className={`${showMotivation ? 'w-80' : 'w-0'} transition-all duration-300 bg-white border-l border-gray-100 p-6 overflow-hidden flex flex-col`}>
+        <div className="bg-gradient-to-br from-orange-400 to-red-500 p-8 rounded-[3rem] text-white shadow-xl shadow-orange-100">
+          <div className="flex justify-between items-start mb-2"><Flame size={40} fill="white" /><span className="text-5xl font-black">{streak}</span></div>
+          <p className="font-bold uppercase text-[10px] tracking-widest text-white/80">Streak thực tế</p>
+        </div>
+        <div className="mt-6 p-8 bg-indigo-50 rounded-[3rem] border border-indigo-100/50">
+          <Lightbulb className="text-indigo-600 mb-3" size={24} />
+          <p className="text-indigo-900 font-bold italic text-sm">Học đủ 3 từ mỗi ngày để duy trì ngọn lửa!</p>
+        </div>
+      </aside>
+
+      {/* MODALS SECTION */}
       {isFolderModalOpen && (
         <div className="fixed inset-0 z-[110] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setIsFolderModalOpen(false)}>
           <div className="bg-white w-full max-w-md rounded-[3rem] p-10 shadow-2xl space-y-6 animate-in zoom-in duration-200" onClick={e => e.stopPropagation()}>
@@ -330,23 +407,11 @@ export default function IpadDashboard() {
           </div>
         </div>
       )}
-
-      {/* MOTIVATION BAR */}
-      <aside className={`${showMotivation ? 'w-80' : 'w-0'} transition-all duration-300 bg-white border-l border-gray-100 p-6 overflow-hidden flex flex-col`}>
-        <div className="bg-gradient-to-br from-orange-400 to-red-500 p-8 rounded-[3rem] text-white shadow-xl shadow-orange-100">
-          <div className="flex justify-between items-start mb-2"><Flame size={40} fill="white" /><span className="text-5xl font-black">{streak}</span></div>
-          <p className="font-bold uppercase text-[10px] tracking-widest text-white/80">Streak liên tục</p>
-        </div>
-        <div className="mt-6 p-8 bg-indigo-50 rounded-[3rem] border border-indigo-100/50">
-          <Lightbulb className="text-indigo-600 mb-3" size={24} />
-          <p className="text-indigo-900 font-bold italic text-sm">"The only way to learn a language is to speak it."</p>
-        </div>
-      </aside>
     </div>
   )
 }
 
-// --- SUB-COMPONENTS ---
+// --- SUB-COMPONENTS (GIỮ NGUYÊN CSS) ---
 function NavItem({ icon, label, active, onClick }: any) {
   return (
     <div onClick={onClick} className={`flex items-center gap-4 p-4 rounded-2xl cursor-pointer transition-all ${active ? 'bg-blue-600 text-white shadow-lg shadow-blue-100' : 'hover:bg-slate-50 text-slate-500'}`}>
